@@ -51,6 +51,10 @@ read -r -p 'Device: mps (Apple GPU), cpu, or cuda (NVIDIA) [mps]: ' DEVICE
 DEVICE="${DEVICE:-mps}"
 case "$DEVICE" in mps|cpu|cuda) ;; *) fail 'Choose mps, cpu, or cuda.' ;; esac
 
+read -r -p 'Track team: blue or all [blue]: ' TRACKING_TEAM
+TRACKING_TEAM="${TRACKING_TEAM:-blue}"
+case "$TRACKING_TEAM" in blue|all) ;; *) fail 'Choose blue or all.' ;; esac
+
 read -r -p 'Maximum frames [Enter = all frames in segment]: ' MAX_FRAMES
 if [[ -n "$MAX_FRAMES" ]]; then
     [[ "$MAX_FRAMES" =~ ^[0-9]+$ && "$MAX_FRAMES" =~ [1-9] ]] ||
@@ -79,6 +83,7 @@ TRACKING_ARGS=(
     --target_video_path "$TARGET"
     --device "$DEVICE"
     --mode PLAYER_TRACKING
+    --tracking_team "$TRACKING_TEAM"
     --analysis_path "$ANALYSIS"
     --source_time_offset "$START_SECONDS"
 )
@@ -86,7 +91,7 @@ if [[ -n "$MAX_FRAMES" ]]; then TRACKING_ARGS+=(--max_frames "$MAX_FRAMES"); fi
 case "$PREVIEW" in y|Y|yes|YES) ;; *) TRACKING_ARGS+=(--no_display);; esac
 
 cd "$ROOT_DIR"
-printf '\nTracking all detected players…\n'
+printf '\nTracking team: %s…\n' "$TRACKING_TEAM"
 "$PYTHON" "${TRACKING_ARGS[@]}"
 printf '\nSaved tracking video: %s\n' "$TARGET"
 "$PYTHON" "$ROOT_DIR/examples/soccer/review_tracking.py" build \

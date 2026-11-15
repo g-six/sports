@@ -54,6 +54,31 @@ limited. Output videos contain annotated frames without source audio.
 
 ### Manually assign player identities after tracking
 
+For a blue-team recording, prevent cross-team association by admitting blue-shirt
+detections **before** ByteTrack sees them:
+
+```bash
+.venv/bin/python examples/soccer/main.py \
+  --source_video_path /path/to/segment.mp4 \
+  --target_video_path /path/to/blue-tracking.mp4 \
+  --mode PLAYER_TRACKING --device mps --no_display \
+  --tracking_team blue --analysis_path /path/to/blue-tracking.tracks.jsonl
+```
+
+`--tracking_team blue` checks the central upper shirt region, avoiding sleeves
+and shorts. White and uncertain detections are removed before association, so a
+white opponent cannot inherit a blue player's ID through those rejected boxes.
+`--tracking_blue_fraction` defaults to `0.12` and accepts values in `(0, 1]`.
+Increase it for stricter colour evidence; stricter values can miss blue players
+under occlusion or poor lighting. The HSV colour gate is specific to blue kits;
+it is not jersey-number recognition or individual player identification.
+Two blue teammates can still exchange IDs. IDs from a fresh tracking run must
+be reviewed again; earlier numeric IDs and assignments cannot be reused.
+
+Direct Python CLI use defaults to `--tracking_team all` for existing workflows.
+The interactive `track-players.sh` now prompts for the team and defaults to
+`blue`. Colour-gate settings are included in each tracking JSONL record.
+
 From the repository root, run `./track-players.sh`. It prompts for the video,
 segment start/duration, device, optional frame limit and preview. Alongside the
 tracking MP4 it now saves `*.tracks.jsonl` and `*.review.html`.

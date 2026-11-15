@@ -20,6 +20,7 @@ from sports.common.view import ViewTransformer
 from sports.common.uniform import UniformClassifier
 from sports.common.detection import detect_people, normalize_person_detections
 from sports.common.motion import CameraMotionEstimator, transform_boxes
+from sports.common.tracking_uniform import filter_blue_shirts
 from sports.configs.soccer import SoccerPitchConfiguration
 
 PARENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -259,6 +260,7 @@ def run_ball_detection(source_video_path: str, device: str) -> Iterator[np.ndarr
 def run_player_tracking(
     source_video_path: str, device: str, analysis_path: Optional[str] = None,
     source_time_offset: float = 0,
+    tracking_team: str = 'all', tracking_blue_fraction: float = .12,
 ) -> Iterator[np.ndarray]:
     """
     Run player tracking on a video and yield annotated frames with tracked players.
@@ -279,6 +281,8 @@ def run_player_tracking(
         for frame_index, frame in enumerate(frame_generator):
             result = player_detection_model(frame, imgsz=1280, verbose=False)[0]
             detections = sv.Detections.from_ultralytics(result)
+            if tracking_team == 'blue':
+                detections = filter_blue_shirts(frame, detections, tracking_blue_fraction)
             detections = tracker.update_with_detections(detections)
             track_ids = detections.tracker_id if detections.tracker_id is not None else []
             if analysis is not None:
@@ -289,6 +293,8 @@ def run_player_tracking(
                     'source_timestamp': source_time_offset + frame_index / video_info.fps,
                     'fps': video_info.fps,
                     'width': video_info.width, 'height': video_info.height,
+                    'tracking_team': tracking_team,
+                    'tracking_blue_fraction': tracking_blue_fraction if tracking_team == 'blue' else None,
                     'detections': [
                         {'tracker_id': int(track_id), 'bbox': box.tolist(),
                          'class_id': int(class_id), 'confidence': float(confidence)}
@@ -551,7 +557,14 @@ def main(
     person_model: Optional[str] = None,
     compensate_camera_motion: bool = False,
     source_time_offset: float = 0,
+    tracking_team: str = 'all', tracking_blue_fraction: float = .12,
 ) -> None:
+    if tracking_team not in ('all', 'blue'):
+        raise ValueError('tracking_team must be all or blue.')
+    if tracking_team != 'all' and mode != Mode.PLAYER_TRACKING:
+        raise ValueError('--tracking_team requires PLAYER_TRACKING.')
+    if not np.isfinite(tracking_blue_fraction) or not 0 < tracking_blue_fraction <= 1:
+        raise ValueError('tracking_blue_fraction must be in (0, 1].')
     if not np.isfinite(source_time_offset) or source_time_offset < 0:
         raise ValueError('source_time_offset must be finite and nonnegative.')
     if mode == Mode.PLAYER_TRACKING and analysis_path:
@@ -587,7 +600,8 @@ def main(
     elif mode == Mode.PLAYER_TRACKING:
         frame_generator = run_player_tracking(
             source_video_path=source_video_path, device=device,
-            analysis_path=analysis_path, source_time_offset=source_time_offset)
+            analysis_path=analysis_path, source_time_offset=source_time_offset,
+            tracking_team=tracking_team, tracking_blue_fraction=tracking_blue_fraction)
     elif mode == Mode.TEAM_CLASSIFICATION:
         frame_generator = run_team_classification(
             source_video_path=source_video_path, device=device)
@@ -626,6 +640,10 @@ if __name__ == '__main__':
     parser.add_argument('--analysis_path', help='Per-frame JSONL output for uniform classification or player tracking.')
     parser.add_argument('--source_time_offset', type=float, default=0,
                         help='Original video start time in seconds for tracking export timestamps.')
+    parser.add_argument('--tracking_team', choices=['all', 'blue'], default='all',
+                        help='PLAYER_TRACKING: admit only this team colour before ID association.')
+    parser.add_argument('--tracking_blue_fraction', type=float, default=.12,
+                        help='Minimum blue fraction of the inner shirt region, in (0, 1].')
     parser.add_argument('--person_model', help='General person model weights; uniform mode determines roles separately.')
     parser.add_argument(
         '--compensate_camera_motion', action='store_true',
@@ -653,4 +671,6 @@ if __name__ == '__main__':
         person_model=args.person_model,
         compensate_camera_motion=args.compensate_camera_motion,
         source_time_offset=args.source_time_offset,
+        tracking_team=args.tracking_team,
+        tracking_blue_fraction=args.tracking_blue_fraction,
     )
