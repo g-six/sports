@@ -54,6 +54,13 @@ limited. Output videos contain annotated frames without source audio.
 
 ### Manually assign player identities after tracking
 
+Outputs and tracking timestamps preserve the source's fractional nominal frame
+rate (for example 29.97 FPS). This avoids slowing the output and stretching
+timestamps through integer FPS truncation. Existing outputs/exports are not
+rewritten; keep each review bound to its original tracking-data hash. Variable
+frame-rate presentation timestamps are not reconstructed by this frame-based
+pipeline.
+
 For a blue-team recording, prevent cross-team association by admitting blue-shirt
 detections **before** ByteTrack sees them:
 

@@ -17,6 +17,7 @@ from sports.annotators.soccer import draw_pitch, draw_points_on_pitch
 from sports.common.ball import BallTracker, BallAnnotator
 from sports.common.team import TeamClassifier
 from sports.common.view import ViewTransformer
+from sports.common.video import read_video_info
 from sports.common.uniform import UniformClassifier
 from sports.common.detection import detect_people, normalize_person_detections
 from sports.common.motion import CameraMotionEstimator, transform_boxes
@@ -274,7 +275,7 @@ def run_player_tracking(
     """
     player_detection_model = YOLO(PLAYER_DETECTION_MODEL_PATH).to(device=device)
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
-    video_info = sv.VideoInfo.from_video_path(source_video_path)
+    video_info = read_video_info(source_video_path)
     tracker = sv.ByteTrack(frame_rate=video_info.fps, minimum_consecutive_frames=3)
     output = open(analysis_path, 'x') if analysis_path else nullcontext(None)
     with output as analysis:
@@ -390,7 +391,7 @@ def run_uniform_classification(
     model = None if raw_frames is not None else YOLO(
         person_model or PLAYER_DETECTION_MODEL_PATH).to(device=device)
     person_id = get_person_class_id(model) if person_model and model is not None else None
-    video_info = sv.VideoInfo.from_video_path(source_video_path)
+    video_info = read_video_info(source_video_path)
     tracker = sv.ByteTrack(frame_rate=video_info.fps, minimum_consecutive_frames=1)
     motion_estimator = CameraMotionEstimator() if compensate_camera_motion else None
     track_offset, maximum_track_id = 0, 0
@@ -611,7 +612,7 @@ def main(
     else:
         raise NotImplementedError(f"Mode {mode} is not implemented.")
 
-    video_info = sv.VideoInfo.from_video_path(source_video_path)
+    video_info = read_video_info(source_video_path)
     if max_frames is not None:
         frame_generator = islice(frame_generator, max_frames)
     total = (

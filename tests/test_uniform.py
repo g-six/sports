@@ -107,7 +107,7 @@ class UniformClassifierTests(unittest.TestCase):
             report = Path(directory) / 'analysis.jsonl'
             with patch('examples.soccer.main.YOLO', return_value=model), \
                     patch('examples.soccer.main.UniformClassifier.from_config', return_value=self.classifier), \
-                    patch('examples.soccer.main.sv.VideoInfo.from_video_path', return_value=SimpleNamespace(fps=30)), \
+                    patch('examples.soccer.main.read_video_info', return_value=SimpleNamespace(fps=30)), \
                     patch('examples.soccer.main.sv.get_video_frames_generator', return_value=iter([frame] * 4)), \
                     patch('examples.soccer.main.sv.Detections.from_ultralytics', side_effect=detections):
                 output = list(run_uniform_classification('unused', 'cpu', 'unused', str(report)))
@@ -138,7 +138,7 @@ class UniformClassifierTests(unittest.TestCase):
             report = Path(directory) / 'analysis.jsonl'
             with patch('examples.soccer.main.YOLO', return_value=model), \
                     patch('examples.soccer.main.UniformClassifier.from_config', return_value=self.classifier), \
-                    patch('examples.soccer.main.sv.VideoInfo.from_video_path', return_value=SimpleNamespace(fps=30)), \
+                    patch('examples.soccer.main.read_video_info', return_value=SimpleNamespace(fps=30)), \
                     patch('examples.soccer.main.sv.get_video_frames_generator', return_value=iter([frame] * 4)), \
                     patch('examples.soccer.main.sv.Detections.from_ultralytics', side_effect=detections):
                 output = list(run_uniform_classification(
@@ -169,7 +169,7 @@ class UniformClassifierTests(unittest.TestCase):
             with patch('examples.soccer.main.YOLO', side_effect=AssertionError('Replay must not run inference')), \
                     patch('examples.soccer.main.UniformClassifier.from_config', return_value=self.classifier), \
                     patch('examples.soccer.main.CameraMotionEstimator', return_value=motion), \
-                    patch('examples.soccer.main.sv.VideoInfo.from_video_path', return_value=SimpleNamespace(fps=30)), \
+                    patch('examples.soccer.main.read_video_info', return_value=SimpleNamespace(fps=30)), \
                     patch('examples.soccer.main.sv.get_video_frames_generator', return_value=iter([frame] * 4)):
                 list(run_uniform_classification(
                     'unused', 'cpu', 'unused', str(report), person_model='cached',

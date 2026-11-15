@@ -75,7 +75,7 @@ class BlueTrackingTests(unittest.TestCase):
             return detections
 
         with patch.object(main, 'YOLO'), patch.object(main.sv, 'ByteTrack') as tracker, \
-                patch.object(main.sv.VideoInfo, 'from_video_path',
+                patch.object(main, 'read_video_info',
                              return_value=SimpleNamespace(fps=29, width=260, height=220)), \
                 patch.object(main.sv, 'get_video_frames_generator', return_value=iter([self.frame])), \
                 patch.object(main.sv.Detections, 'from_ultralytics', return_value=raw):
