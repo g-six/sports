@@ -119,8 +119,20 @@ page produced by `review_tracking.py build` or `track-players.sh`:
 
 `--blue-only` is an optional blue-shirt pixel filter; omit it for other uniforms.
 This filter can miss small or obscured blue shirts. A track ID is not a jersey
-number and can switch identities. Check the video before assigning a whole
-track; named button decisions cover the track's full observed frame range.
+number and can switch identities. **A button decision confirms only the exact
+displayed frame, never the rest of that track.** Different samples of the same ID
+may show different people. Cards and downloaded decisions include `sample_frame`.
+Use enlarged context from the matching segment when tight crops are hard to read:
+
+```bash
+.venv/bin/python examples/soccer/player_review.py build \
+  --workspace examples/soccer/output/player-review --player Alex \
+  --context-video /path/to/match.mp4 --analysis /path/to/match.tracks.jsonl \
+  --output examples/soccer/output/player-review/context-batch.html
+```
+
+The context image highlights the selected detection at that same frame. Upscaling
+makes the scene easier to inspect but cannot recover missing detail.
 
 Open the batch page in a browser and use **Yes**, **Not the player**, **Skip** and
 **Undo**. Download `player-decisions.json` to save a durable copy. A batch can load
@@ -135,12 +147,27 @@ confirms. Ordinary browsers use the download/copy fallback. Merge a download:
 ```
 
 Merges are idempotent, validate the entire batch before writing, and bind decisions
-to the tracking-data hash and player. A manual decision overrides an automatic
-exclusion. Skipped tracks stay unresolved and are omitted from subsequent batches;
+to the tracking-data hash, player, and exact displayed sample. A manual decision
+overrides an automatic exclusion of that same sample. Skipped samples stay
+unresolved and are omitted from subsequent batches;
 remove their entries from `skipped_matches` in `named-assignments.json` to revisit
 them. Automatic exclusions live separately in `automatic_exclusions`; remove an
-entry to undo it. The named file can be passed directly to
-`review_tracking.py render --assignments ...` to draw player names.
+entry to undo it. Another sample of an ID remains reviewable after a yes or no.
+Positive samples save `confirmed_sample_frame`, `continuity_status: unverified`
+and a one-frame interval. `review_tracking.py render --assignments ...` labels
+only those confirmed frames. It rejects legacy unverified full-track assignments.
+To label a continuous interval, first inspect that interval in the video and
+explicitly verify its identity:
+
+```bash
+.venv/bin/python examples/soccer/player_review.py verify-range \
+  --workspace examples/soccer/output/player-review --player Alex \
+  --track-id 42 --start-frame 300 --end-frame 450
+```
+
+The end frame is excluded. This command records the user's range verification;
+it does not infer continuity from a thumbnail. Keep verified ranges short around
+occlusions, camera cuts, and suspected identity switches.
 
 Once you have at least five positive and five negative examples spread across
 five 30-second windows, train an appearance ranking:
@@ -155,10 +182,12 @@ five 30-second windows, train an appearance ranking:
 ```
 
 The model uses coarse clothing, head-region colour and texture features; these
-are appearance cues, not face recognition or demographic inference. It combines
-sample views per track and holds nearby tracks together during validation. The
+are appearance cues, not face recognition or demographic inference. It trains
+only on the exact crops reviewed as yes or no, never propagating one label to
+first/best/last crops of an ID. Samples of the same track remain together during
+validation, alongside nearby track starts. The
 report includes average precision, top-40 precision, and the number of held-out
-confirmed tracks below a proposed exclusion threshold. Those numbers describe
+confirmed samples below a proposed exclusion threshold. Those numbers describe
 the labelled sample, not guaranteed performance on unreviewed footage. Candidate
 updates are compared against the previous training set on identical grouped folds;
 updates are accepted only when both ranking metrics do not decrease. Otherwise
@@ -167,8 +196,9 @@ Appearance exclusions are only proposals in this report; they are not applied by
 the ranking command. More varied views and lighting are preferable to aggressive
 thresholds when the report shows uncertainty.
 
-An optional temporal check can propose tracks that appear far from an already
-confirmed player at the same time:
+An optional temporal check can propose samples that appear far from a player
+inside an explicitly verified continuous range. Unverified thumbnail decisions
+and legacy assignments are never temporal evidence:
 
 ```bash
 .venv/bin/python examples/soccer/temporal_player_filter.py \
@@ -180,9 +210,18 @@ Inspect `temporal-filter-report.json`. Add `--apply` to save reversible exclusio
 only when there are no conflicts with confirmed tracks. The rule requires at least
 five shared frames, separation exceeding two player heights in every shared
 frame, no near matches, and shared evidence covering at least 60% of observations.
-It respects confirmed frame ranges and avoids treating nearby duplicate detections
-as different people. Camera cuts and identity switches can still invalidate its
-assumptions. Keep crops, workspaces, decisions and reports local; the repository's
+Only sample frames with actual separation evidence are excluded, never an entire
+target ID. It respects verified frame ranges and avoids treating nearby duplicate
+detections as different people. Camera cuts and identity switches can still
+invalidate its assumptions.
+
+Workspaces from the earlier whole-track workflow require a fresh `prepare` into
+a new directory. Keep old decisions as a record; do not treat them as verified
+intervals. Downloads without `sample_frame` must be reviewed again with an exact
+frame reference. Old appearance caches/ranking reports and temporal exclusion
+reports are incompatible and must be regenerated. Legacy whole-track automatic
+exclusions are ignored by the new sample queue. Keep crops, workspaces,
+decisions and reports local; the repository's
 `examples/soccer/output/` directory is ignored by Git.
 
 ### Uniform references and stable role labels

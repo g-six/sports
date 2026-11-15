@@ -6,9 +6,11 @@
 .images,.controls{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:16px 0}
 figure{margin:0;flex:1;min-width:150px}img{height:260px;max-width:100%;object-fit:contain;object-position:left}
 button{font:inherit;padding:10px;cursor:pointer}textarea{font:inherit;width:100%;box-sizing:border-box}
+.contextual #candidate{width:100%;height:auto;max-height:480px}
 </style>
 <main id="player-review">
 <h1 id="heading"></h1><p id="progress" aria-live="polite"></p>
+<p>Identify the highlighted sample only. A tracking ID can switch players; this does not verify its full time range.</p>
 <div class="images"><figure><figcaption id="label"></figcaption><img id="candidate" alt="Candidate"><p id="time"></p></figure>
 <figure id="reference-figure"><figcaption id="reference-label"></figcaption><img id="reference" alt="Confirmed player reference"></figure></div>
 <div class="controls"><button id="no">Not the player</button><button id="skip">Skip</button><button id="yes">Yes</button><button id="undo">Undo</button></div>
@@ -22,11 +24,12 @@ button{font:inherit;padding:10px;cursor:pointer}textarea{font:inherit;width:100%
 const payload=__PAYLOAD__;
 const root=document.getElementById('player-review');
 const el=id=>root.querySelector('#'+id),player=payload.player;
+if(payload.contextual)root.classList.add('contextual');
 let history=[],sending=false;
 function restore(saved){
  const state=saved?.modelContent;
  if(state?.batch_key===payload.batch_key&&Array.isArray(state.decisions)){
-  const valid=[];for(const d of state.decisions){if(d.track_id!==payload.cards[valid.length]?.track_id||!['yes','no','skip'].includes(d.decision))break;valid.push(d);}history=valid;
+  const valid=[];for(const d of state.decisions){const c=payload.cards[valid.length];if(d.track_id!==c?.track_id||d.sample_frame!==c?.sample_frame||!['yes','no','skip'].includes(d.decision))break;valid.push(d);}history=valid;
  }
 }
 restore(window.openai?.widgetState);
@@ -36,9 +39,9 @@ function time(frame){const s=frame/payload.baseline.fps;return `${Math.floor(s/6
 function render(){
  const card=payload.cards[history.length];
  el('progress').textContent=`${history.length} / ${payload.cards.length} reviewed`;
- el('label').textContent=card?`Track ID ${card.track_id} · Unconfirmed`:'Batch complete';
+ el('label').textContent=card?`Track ID ${card.track_id} · Frame ${card.sample_frame} · Unconfirmed`:'Batch complete';
  el('candidate').hidden=!card;if(card){el('candidate').src=card.image;el('candidate').alt=`Track ID ${card.track_id}`;}
- el('time').textContent=card?`${time(card.start_frame)}–${time(card.end_frame)}`:'';
+ el('time').textContent=card?`Shown frame: ${time(card.sample_frame)} · Track span ${time(card.start_frame)}–${time(card.end_frame)} (continuity unverified)`:'';
  for(const id of ['no','yes','skip'])el(id).disabled=!card;
  el('undo').disabled=!history.length;el('submit').disabled=!history.length||sending;
  el('decisions').value=JSON.stringify(documentData(),null,2);
@@ -52,7 +55,7 @@ async function submit(){
  catch(error){el('status').textContent='Submission failed: '+error.message+'. Download or copy decisions instead.';}
  finally{sending=false;el('submit').disabled=false;}
 }
-function choose(decision){if(history.length>=payload.cards.length)return;history.push({track_id:payload.cards[history.length].track_id,decision});persist();render();if(history.length===payload.cards.length)submit();}
+function choose(decision){if(history.length>=payload.cards.length)return;const card=payload.cards[history.length];history.push({track_id:card.track_id,sample_frame:card.sample_frame,decision});persist();render();if(history.length===payload.cards.length)submit();}
 el('heading').textContent=`${player} · Player review`;el('yes').textContent=`Yes, ${player}`;el('no').textContent=`Not ${player}`;
 el('reference-figure').hidden=!payload.reference;if(payload.reference){el('reference').src=payload.reference;el('reference-label').textContent=`Confirmed ${player} · Track ${payload.reference_id}`;}
 el('yes').onclick=()=>choose('yes');el('no').onclick=()=>choose('no');el('skip').onclick=()=>choose('skip');

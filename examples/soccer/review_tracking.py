@@ -118,6 +118,12 @@ def validate_assignments(document, analysis_path, fps, frame_count):
             name = item.get('name')
             if not isinstance(name, str) or not name.strip() or len(name) > 60:
                 raise ValueError('Player name must contain 1–60 characters.')
+            if item.get('continuity_status') != 'verified':
+                frame = item.get('confirmed_sample_frame')
+                if (item.get('continuity_status') != 'unverified' or type(frame) is not int
+                        or start != frame or end != frame + 1):
+                    raise ValueError('Named track continuity is unverified. Confirm the displayed sample_frame only, '
+                                     'or review the video and use player_review.py verify-range before rendering a range.')
         else:
             team, jersey = item['team'], item['jersey']
             if not isinstance(team, str) or not team.strip() or len(team) > 60:
@@ -127,6 +133,17 @@ def validate_assignments(document, analysis_path, fps, frame_count):
         grouped.setdefault(track_id, []).append(item)
     for items in grouped.values():
         items.sort(key=lambda item: item['start_frame'])
+        if document['schema'] == 'named-player-assignments-v1':
+            # A verified interval may cover an existing exact-sample confirmation.
+            merged = []
+            for item in items:
+                if merged and merged[-1]['end_frame'] > item['start_frame']:
+                    if merged[-1]['name'] != item['name']:
+                        raise ValueError('Different players overlap on the same track; correct their ranges.')
+                    merged[-1] = dict(merged[-1], end_frame=max(merged[-1]['end_frame'], item['end_frame']))
+                else:
+                    merged.append(dict(item))
+            items[:] = merged
         if any(a['end_frame'] > b['start_frame'] for a, b in zip(items, items[1:])):
             raise ValueError('Assignments for the same track overlap; split their frame ranges.')
     return grouped

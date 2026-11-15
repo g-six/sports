@@ -6,10 +6,10 @@ from collections import defaultdict
 from pathlib import Path
 
 try:
-    from .player_review import load_workspace
+    from .player_review import load_workspace, sample_decisions
     from .review_tracking import fingerprint, records
 except ImportError:
-    from player_review import load_workspace
+    from player_review import load_workspace, sample_decisions
     from review_tracking import fingerprint, records
 
 
@@ -18,11 +18,12 @@ def temporal_report(analysis, document, player):
         raise ValueError('Tracking data belongs to another review run.')
     ranges = defaultdict(list)
     for assignment in document['assignments']:
-        if assignment['name'] == player:
+        if assignment['name'] == player and assignment.get('continuity_status') == 'verified':
             ranges[assignment['tracker_id']].append((assignment['start_frame'], assignment['end_frame']))
     yes = set(ranges)
     no = {a['tracker_id'] for a in document.get('rejected_matches', []) if a['name'] == player}
     stats = defaultdict(lambda: dict(observations=0, shared=0, near=0, far=0))
+    far_frames = defaultdict(list)
     for row in records(analysis):
         frame = row['frame_index']
         known = [d for d in row['detections'] if any(
@@ -44,13 +45,25 @@ def temporal_report(analysis, document, player):
             s['shared'] += 1
             s['near'] += int(distance < 1)
             s['far'] += int(distance > 2)
+            if distance > 2:
+                far_frames[tid].append(frame)
     rejected = [tid for tid, s in stats.items() if s['shared'] >= 5 and s['near'] == 0
                 and s['far'] == s['shared'] and s['shared']/s['observations'] >= .6]
+    def intervals(frames):
+        output = []
+        for frame in frames:
+            if output and output[-1][1] == frame:
+                output[-1][1] = frame+1
+            else:
+                output.append([frame, frame+1])
+        return output
     return {'analysis_sha256': document['analysis_sha256'], 'player': player,
+            'evidence_version': 'verified-ranges-v2',
             'method': 'Simultaneous separation; self-ID excluded from comparison.',
             'confirmed_player_conflicts': [tid for tid in rejected if tid in yes],
             'manual_negative_matches': sum(tid in no for tid in rejected),
             'proposed_exclusions': [tid for tid in rejected if tid not in yes | no],
+            'far_frame_ranges': {tid: intervals(far_frames[tid]) for tid in rejected},
             'tracks': dict(stats)}
 
 
@@ -58,19 +71,23 @@ def apply_exclusions(workspace, report):
     data, doc = load_workspace(workspace)
     if report['analysis_sha256'] != data['analysis_sha256']:
         raise ValueError('Report belongs to another tracking run.')
+    if report.get('evidence_version') != 'verified-ranges-v2':
+        raise ValueError('Legacy temporal reports used unverified whole tracks; regenerate the report.')
     if report['confirmed_player_conflicts']:
         raise ValueError('Temporal evidence conflicts with confirmed tracks; inspect the report first.')
     player = report['player']
-    decided = {a['tracker_id'] for field in ('assignments', 'rejected_matches',
-                                           'skipped_matches', 'automatic_exclusions')
-               for a in doc.get(field, []) if a.get('name') == player}
-    candidates = {c['track_id'] for c in json.loads((workspace/'candidates.json').read_text())['candidates']}
+    decided = sample_decisions(doc, player)
+    candidates = json.loads((workspace/'candidates.json').read_text())['candidates']
     added = 0
-    for tid in report['proposed_exclusions']:
-        if tid in decided or tid not in candidates:
+    for candidate in candidates:
+        tid, frame = candidate['track_id'], candidate['sample_frame']
+        if (tid, frame) in decided or tid not in report['proposed_exclusions']:
+            continue
+        intervals = report['far_frame_ranges'].get(tid, report['far_frame_ranges'].get(str(tid), []))
+        if not any(start <= frame < end for start, end in intervals):
             continue
         doc.setdefault('automatic_exclusions', []).append({
-            'tracker_id': tid, 'name': player, 'method': 'temporal-separation',
+            'tracker_id': tid, 'sample_frame': frame, 'name': player, 'method': 'temporal-separation',
             'reason': 'Over two player-heights apart in at least 5 shared frames and 60% of observations; no near matches.',
             'evidence': report['tracks'].get(tid, report['tracks'].get(str(tid))), 'reversible': True})
         added += 1

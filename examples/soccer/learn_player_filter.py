@@ -8,6 +8,29 @@ import numpy as np
 from sklearn.ensemble import ExtraTreesClassifier
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.metrics import average_precision_score
+try:
+    from .player_review import sample_decisions
+except ImportError:
+    from player_review import sample_decisions
+
+
+def sample_training_labels(document, player):
+    """Only exact reviewed crops are supervised; a name never labels another frame of its track."""
+    labels = {}
+    for field, value in [('assignments', 1), ('rejected_matches', 0)]:
+        for entry in document.get(field, []):
+            if entry.get('name') != player:
+                continue
+            frame = entry.get('confirmed_sample_frame') if value else entry.get('sample_frame')
+            if type(frame) is not int:
+                continue
+            key = (entry['tracker_id'], frame)
+            if key in labels and labels[key] != value:
+                raise ValueError('Conflicting labels for the same sample; correct the decisions first.')
+            labels[key] = value
+    return labels
+
+
 def features(image):
     # Generic colour/texture only: no face embeddings or demographic inference.
     h, w = image.shape[:2]
@@ -42,44 +65,41 @@ def main():
     doc = json.loads((ROOT/'named-assignments.json').read_text())
     if doc['analysis_sha256'] != data['analysis_sha256']:
         raise ValueError('Assignments belong to another tracking run.')
-    blue = json.loads((ROOT/'candidates.json').read_text())['candidates']
-    cache = ROOT/'appearance-features.npz'
+    cache = ROOT/'sample-appearance-features.npz'
     source_hash = data['analysis_sha256']
+    feature_version = 'sample-colour-v2'
     if cache.exists():
         with np.load(cache) as saved:
-            if str(saved['source_hash']) != source_hash:
-                raise ValueError('Feature cache belongs to another tracking run; remove it.')
-            ids, matrix = saved['ids'], saved['features']
+            if str(saved['source_hash']) != source_hash or str(saved['feature_version']) != feature_version:
+                raise ValueError('Feature cache belongs to another tracking run/version; remove it.')
+            keys, matrix = saved['keys'], saved['features']
     else:
-        rows, ids = [], []
-        for candidate in blue:
-            track = tracks[candidate['track_id']]
-            samples = []
+        rows, keys = [], []
+        for track in data['tracks']:
             for sample in track['samples']:
                 image = cv2.imread(str(ROOT/'images'/f"track-{track['id']}-frame-{sample['frame']}.jpg"))
                 if image is not None:
-                    samples.append(features(image))
-            if samples:
-                rows.append(np.concatenate((np.mean(samples, axis=0), np.std(samples, axis=0))))
-                ids.append(track['id'])
-        ids, matrix = np.asarray(ids), np.asarray(rows)
-        np.savez_compressed(cache, ids=ids, features=matrix, source_hash=source_hash)
-    yes = {a['tracker_id'] for a in doc['assignments'] if a['name'] == args.player}
-    no = {a['tracker_id'] for a in doc['rejected_matches'] if a['name'] == args.player}
-    labelled = np.asarray([i for i, tid in enumerate(ids) if tid in yes or tid in no], dtype=int)
+                    rows.append(features(image))
+                    keys.append((track['id'], sample['frame']))
+        keys, matrix = np.asarray(keys, dtype=int).reshape(-1, 2), np.asarray(rows)
+        np.savez_compressed(cache, keys=keys, features=matrix, source_hash=source_hash,
+                            feature_version=feature_version)
+    labels = sample_training_labels(doc, args.player)
+    labelled = np.asarray([i for i, key in enumerate(keys) if tuple(key) in labels], dtype=int)
     x = matrix[labelled]
-    y = np.asarray([int(ids[i] in yes) for i in labelled], dtype=int)
+    y = np.asarray([labels[tuple(keys[i])] for i in labelled], dtype=int)
     # Hold nearby tracks together to reduce leakage from adjacent views.
-    groups = np.asarray([int(tracks[int(ids[i])]['start']/data['fps']/30) for i in labelled])
+    groups = np.asarray([int(tracks[int(keys[i][0])]['start']/data['fps']/30) for i in labelled])
     if min(np.bincount(y, minlength=2)) < 5 or len(set(groups)) < 5:
         raise ValueError('Ranking needs at least five positives, five negatives, and five 30-second groups.')
     report_path = ROOT/'learned-filter-report.json'
     previous = json.loads(report_path.read_text()) if report_path.exists() else {}
-    if previous.get('analysis_sha256') != source_hash or previous.get('player') != args.player:
+    if (previous.get('analysis_sha256') != source_hash or previous.get('player') != args.player
+            or previous.get('feature_version') != feature_version):
         previous = {}
-    current_ids = np.asarray([int(ids[i]) for i in labelled])
-    prior_ids = set(previous.get('active_training_track_ids', current_ids.tolist()))
-    prior_mask = np.asarray([tid in prior_ids for tid in current_ids])
+    current_keys = [f'{keys[i][0]}:{keys[i][1]}' for i in labelled]
+    prior_keys = set(previous.get('active_training_sample_keys', current_keys))
+    prior_mask = np.asarray([key in prior_keys for key in current_keys])
     cv = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
     candidate_oof, baseline_oof = np.zeros(len(y)), np.zeros(len(y))
     comparable = True
@@ -117,17 +137,20 @@ def main():
                                  class_weight='balanced', n_jobs=2, random_state=42)
     model.fit(x[active_mask], y[active_mask])
     scores = model.predict_proba(matrix)[:, 1]
-    decided = yes | no | {a['tracker_id'] for k in ('skipped_matches', 'automatic_exclusions')
-                          for a in doc.get(k, []) if a.get('name') == args.player}
-    predictions = [{'track_id': int(tid), 'appearance_score': float(score),
-                    'proposed_exclusion': bool(score < threshold)}
-                   for tid, score in zip(ids, scores) if tid not in decided]
+    decided = sample_decisions(doc, args.player)
+    candidates = {(c['track_id'], c['sample_frame']) for c in
+                  json.loads((ROOT/'candidates.json').read_text())['candidates']}
+    predictions = [{'track_id': int(key[0]), 'sample_frame': int(key[1]),
+                    'appearance_score': float(score), 'proposed_exclusion': bool(score < threshold)}
+                   for key, score in zip(keys, scores)
+                   if tuple(key) in candidates and tuple(key) not in decided]
     report = {'method': 'Generic clothing, hair-region and colour features; no face recognition.',
               'validation': '5 folds grouped by 30-second track-start windows',
               'regression_gate': {'accepted': accepted, 'comparable': comparable,
                                   'candidate': candidate_metrics, 'baseline': baseline_metrics},
-              'active_training_track_ids': current_ids[active_mask].tolist(),
-              'manual_positive_tracks': int(y.sum()), 'manual_negative_tracks': int((y == 0).sum()),
+              'feature_version': feature_version,
+              'active_training_sample_keys': [key for key, active in zip(current_keys, active_mask) if active],
+              'manual_positive_samples': int(y.sum()), 'manual_negative_samples': int((y == 0).sum()),
               'threshold': threshold, 'held_out_positive_minimum': float(oof[y == 1].min()),
               'held_out_average_precision': float(average_precision_score(y, oof)) if comparable else None,
               'held_out_top40_precision': float(y[top].mean()) if comparable else None,
@@ -138,7 +161,7 @@ def main():
               'validation_note': 'Threshold is chosen from these folds, not an independent test; future accuracy is not guaranteed.',
               'analysis_sha256': source_hash, 'player': args.player, 'predictions': predictions}
     (ROOT/'learned-filter-report.json').write_text(json.dumps(report, indent=2)+'\n')
-    print(json.dumps({k: v for k, v in report.items() if k not in ('predictions', 'active_training_track_ids')}, indent=2))
+    print(json.dumps({k: v for k, v in report.items() if k not in ('predictions', 'active_training_sample_keys')}, indent=2))
 
 
 if __name__ == '__main__':
