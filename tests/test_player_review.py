@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import subprocess
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 import cv2
@@ -84,6 +85,12 @@ class PlayerReviewTests(unittest.TestCase):
         report = temporal_report(self.analysis, doc, 'Alex')
         self.assertEqual(report['confirmed_player_conflicts'], [])
         self.assertEqual(report['proposed_exclusions'], [2])
+        automatic = deepcopy(doc)
+        for version in ('v1', 'v2'):
+            for assignment in automatic['assignments']:
+                if assignment.get('continuity_status') == 'verified':
+                    assignment['verification_source'] = f'automatic-anchor-gates-{version}'
+            self.assertEqual(temporal_report(self.analysis, automatic, 'Alex')['proposed_exclusions'], [])
         self.assertEqual(apply_exclusions(self.workspace, report), 1)
         self.assertEqual(apply_exclusions(self.workspace, report), 0)
         _, saved = load_workspace(self.workspace)

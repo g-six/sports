@@ -256,6 +256,58 @@ exclusions are ignored by the new sample queue. Keep crops, workspaces,
 decisions and reports local; the repository's
 `examples/soccer/output/` directory is ignored by Git.
 
+### Automatic short intervals around confirmed samples
+
+When automatic processing is desired, the verifier can extend an exact confirmed
+sample into a short interval of the **same tracking ID**. It never assigns a new
+identity or links IDs. Audit first, or add `--apply` to save passing intervals with
+explicit automatic provenance and a reversible record:
+
+```bash
+.venv/bin/python examples/soccer/auto_verify_player.py \
+  --video /path/to/match.mp4 --analysis /path/to/match.tracks.jsonl \
+  --assignments examples/soccer/output/player-review/named-assignments.json \
+  --player Alex --report examples/soccer/output/player-review/anchor-audit.json \
+  --apply
+```
+
+The default window is at most one second before and after the confirmed frame.
+Every extension requires blue upper-torso evidence, stable upper/lower clothing
+colour relative to both the anchor and neighbouring observation, smooth motion,
+consistent size, no close competing person, and no gap exceeding two frames.
+The report records stop reasons, checked detections, colour minima and bridged
+gaps. These are conservative evidence rules, **not calibrated identity
+probabilities**. Team colour or an appearance score alone cannot pass the gates.
+
+Explicit mixed/unresolved track flags and known negative samples block extension.
+An existing user-verified interval is never changed; proposed overlapping edits
+are skipped. Passing entries retain `confirmed_sample_frame`, save their original
+`reported_track_range`, and use `verification_source: automatic-anchor-gates-v2`.
+Their original entries are retained in `automatic_verification_audit`. These
+automatic intervals can be rendered, but are not used as temporal exclusion
+references, avoiding a cascade of inferred identities. They are not extended
+again on subsequent runs. To undo unchanged automatic edits without overwriting
+later manual corrections:
+
+```bash
+.venv/bin/python examples/soccer/auto_verify_player.py \
+  --assignments examples/soccer/output/player-review/named-assignments.json --revert
+```
+
+Use the exact frame-aligned video paired with the export. Source FPS, dimensions,
+frame count and tracking hash are checked; similar metadata cannot prove that a
+different recording is aligned. Future tracking exports include `all_person_boxes`
+before blue filtering, so white-team players still block ambiguous crossings.
+Older all-player exports can supply this context from their detections (ball
+class 0 is ignored). A blue-only export without all-person context cannot safely
+extend a sample. Supply a matching full export with `--competitor-analysis` or
+generate a new export; missing competitor coverage is never silently accepted.
+No detector or GPU inference is run by this verifier.
+The v2 colour descriptor includes brightness as well as hue/saturation, so a
+white-to-black garment change cannot pass as an unchanged neutral colour. Older
+v1 reports are rejected by `--apply`; revert old automatic edits and regenerate
+the audit before applying the tightened rule. Reversion supports old audit records.
+
 ### Uniform references and stable role labels
 
 `UNIFORM_CLASSIFICATION` uses manually selected uniform examples instead of the

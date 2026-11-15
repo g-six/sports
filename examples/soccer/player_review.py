@@ -153,7 +153,7 @@ def verify_range(workspace, player, track_id, start_frame, end_frame):
         else:
             kept.append(entry)
     kept.append(dict(tracker_id=track_id, name=player, start_frame=start_frame,
-                     end_frame=end_frame, continuity_status='verified'))
+                     end_frame=end_frame, continuity_status='verified', verification_source='user-reviewed'))
     doc['assignments'] = kept
     path = workspace/'named-assignments.json'
     temporary = path.with_suffix('.json.tmp')

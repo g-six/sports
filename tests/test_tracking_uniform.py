@@ -1,4 +1,7 @@
 import unittest
+import json
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -80,9 +83,15 @@ class BlueTrackingTests(unittest.TestCase):
                 patch.object(main.sv, 'get_video_frames_generator', return_value=iter([self.frame])), \
                 patch.object(main.sv.Detections, 'from_ultralytics', return_value=raw):
             tracker.return_value.update_with_detections.side_effect = update
-            list(main.run_player_tracking('test.mp4', 'cpu', tracking_team='blue'))
+            with tempfile.TemporaryDirectory() as directory:
+                report = Path(directory)/'tracking.jsonl'
+                list(main.run_player_tracking('test.mp4', 'cpu', str(report), tracking_team='blue'))
+                row = json.loads(report.read_text())
         self.assertEqual(len(received), 1)
         np.testing.assert_array_equal(received[0], [self.blue])
+        self.assertEqual(len(row['detections']), 1)
+        self.assertEqual(len(row['all_person_boxes']), 2)
+        np.testing.assert_array_equal(row['all_person_boxes'][1], self.white)
 
 
 if __name__ == '__main__':

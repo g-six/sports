@@ -18,7 +18,8 @@ def temporal_report(analysis, document, player):
         raise ValueError('Tracking data belongs to another review run.')
     ranges = defaultdict(list)
     for assignment in document['assignments']:
-        if assignment['name'] == player and assignment.get('continuity_status') == 'verified':
+        if (assignment['name'] == player and assignment.get('continuity_status') == 'verified'
+                and not str(assignment.get('verification_source', '')).startswith('automatic-anchor-gates-')):
             ranges[assignment['tracker_id']].append((assignment['start_frame'], assignment['end_frame']))
     yes = set(ranges)
     no = {a['tracker_id'] for a in document.get('rejected_matches', []) if a['name'] == player}

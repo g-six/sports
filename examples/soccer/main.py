@@ -282,6 +282,9 @@ def run_player_tracking(
         for frame_index, frame in enumerate(frame_generator):
             result = player_detection_model(frame, imgsz=1280, verbose=False)[0]
             detections = sv.Detections.from_ultralytics(result)
+            all_person_boxes = detections.xyxy[
+                np.isin(detections.class_id, [GOALKEEPER_CLASS_ID, PLAYER_CLASS_ID, REFEREE_CLASS_ID])
+            ].tolist() if len(detections) and detections.class_id is not None else []
             if tracking_team == 'blue':
                 detections = filter_blue_shirts(frame, detections, tracking_blue_fraction)
             detections = tracker.update_with_detections(detections)
@@ -295,6 +298,7 @@ def run_player_tracking(
                     'fps': video_info.fps,
                     'width': video_info.width, 'height': video_info.height,
                     'tracking_team': tracking_team,
+                    'all_person_boxes': all_person_boxes,
                     'tracking_blue_fraction': tracking_blue_fraction if tracking_team == 'blue' else None,
                     'detections': [
                         {'tracker_id': int(track_id), 'bbox': box.tolist(),
