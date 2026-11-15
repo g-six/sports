@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Named player review</title>
+<style>
+:root{color-scheme:light dark;font:16px system-ui}body{max-width:850px;margin:24px auto;padding:0 16px}
+.images,.controls{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:16px 0}
+figure{margin:0;flex:1;min-width:150px}img{height:260px;max-width:100%;object-fit:contain;object-position:left}
+button{font:inherit;padding:10px;cursor:pointer}textarea{font:inherit;width:100%;box-sizing:border-box}
+</style>
+<main id="player-review">
+<h1 id="heading"></h1><p id="progress" aria-live="polite"></p>
+<div class="images"><figure><figcaption id="label"></figcaption><img id="candidate" alt="Candidate"><p id="time"></p></figure>
+<figure id="reference-figure"><figcaption id="reference-label"></figcaption><img id="reference" alt="Confirmed player reference"></figure></div>
+<div class="controls"><button id="no">Not the player</button><button id="skip">Skip</button><button id="yes">Yes</button><button id="undo">Undo</button></div>
+<p id="status" role="status"></p>
+<div class="controls"><button id="submit">Submit to chat</button><button id="download">Download decisions</button><button id="copy">Copy decisions</button></div>
+<label for="decisions">Decisions (copy fallback)</label><textarea id="decisions" rows="5" readonly></textarea>
+<label>Resume downloaded decisions <input type="file" id="resume" accept=".json"></label>
+</main>
+<script>
+(()=>{
+const payload=__PAYLOAD__;
+const root=document.getElementById('player-review');
+const el=id=>root.querySelector('#'+id),player=payload.player;
+let history=[],sending=false;
+function restore(saved){
+ const state=saved?.modelContent;
+ if(state?.batch_key===payload.batch_key&&Array.isArray(state.decisions)){
+  const valid=[];for(const d of state.decisions){if(d.track_id!==payload.cards[valid.length]?.track_id||!['yes','no','skip'].includes(d.decision))break;valid.push(d);}history=valid;
+ }
+}
+restore(window.openai?.widgetState);
+function persist(){window.openai?.setWidgetState?.({modelContent:{batch_key:payload.batch_key,analysis_sha256:payload.baseline.analysis_sha256,player,decisions:history},privateContent:null})?.catch(()=>{});}
+function documentData(){return {analysis_sha256:payload.baseline.analysis_sha256,player,batch_key:payload.batch_key,decisions:history};}
+function time(frame){const s=frame/payload.baseline.fps;return `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toFixed(2).padStart(5,'0')}`;}
+function render(){
+ const card=payload.cards[history.length];
+ el('progress').textContent=`${history.length} / ${payload.cards.length} reviewed`;
+ el('label').textContent=card?`Track ID ${card.track_id} · Unconfirmed`:'Batch complete';
+ el('candidate').hidden=!card;if(card){el('candidate').src=card.image;el('candidate').alt=`Track ID ${card.track_id}`;}
+ el('time').textContent=card?`${time(card.start_frame)}–${time(card.end_frame)}`:'';
+ for(const id of ['no','yes','skip'])el(id).disabled=!card;
+ el('undo').disabled=!history.length;el('submit').disabled=!history.length||sending;
+ el('decisions').value=JSON.stringify(documentData(),null,2);
+ el('status').textContent=card?'Use buttons. Download decisions to keep a durable copy.':'Batch complete. Download decisions, then merge them with the apply command.';
+}
+async function submit(){
+ if(sending||!history.length)return;
+ if(!window.openai?.sendFollowUpMessage){el('status').textContent='Direct submission is unavailable. Download decisions or copy the text below.';return;}
+ sending=true;el('submit').disabled=true;
+ try{await window.openai.sendFollowUpMessage({prompt:'Save these named-player review decisions, preserving previous decisions, then prepare the next batch. '+JSON.stringify(documentData()),title:'Save player review decisions'});el('status').textContent='Submission requested. Decisions are saved only after chat confirms.';}
+ catch(error){el('status').textContent='Submission failed: '+error.message+'. Download or copy decisions instead.';}
+ finally{sending=false;el('submit').disabled=false;}
+}
+function choose(decision){if(history.length>=payload.cards.length)return;history.push({track_id:payload.cards[history.length].track_id,decision});persist();render();if(history.length===payload.cards.length)submit();}
+el('heading').textContent=`${player} · Player review`;el('yes').textContent=`Yes, ${player}`;el('no').textContent=`Not ${player}`;
+el('reference-figure').hidden=!payload.reference;if(payload.reference){el('reference').src=payload.reference;el('reference-label').textContent=`Confirmed ${player} · Track ${payload.reference_id}`;}
+el('yes').onclick=()=>choose('yes');el('no').onclick=()=>choose('no');el('skip').onclick=()=>choose('skip');
+el('undo').onclick=()=>{history.pop();persist();render();};el('submit').onclick=submit;
+el('download').onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify(documentData(),null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='player-decisions.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+el('copy').onclick=async()=>{el('decisions').focus();el('decisions').select();try{await navigator.clipboard.writeText(el('decisions').value);el('status').textContent='Copied decisions.';}catch(error){el('status').textContent='Text selected. Press Cmd+C or Ctrl+C.';}};
+el('resume').onchange=async event=>{try{const saved=JSON.parse(await event.target.files[0].text());if(saved.batch_key!==payload.batch_key||saved.analysis_sha256!==payload.baseline.analysis_sha256||saved.player!==player)throw Error('Decisions belong to another batch or player.');restore({modelContent:saved});persist();render();}catch(error){el('status').textContent=error.message;}};
+window.addEventListener('openai:set_globals',event=>{if(event.detail?.globals?.widgetState){restore(event.detail.globals.widgetState);render();}});
+render();
+})();
+</script></html>

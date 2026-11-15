@@ -101,7 +101,7 @@ def build_review(video_path, analysis_path, output_path):
 
 
 def validate_assignments(document, analysis_path, fps, frame_count):
-    if document.get('schema') != 'player-assignments-v1':
+    if document.get('schema') not in ('player-assignments-v1', 'named-player-assignments-v1'):
         raise ValueError('Unsupported assignments format.')
     if document.get('analysis_sha256') != fingerprint(analysis_path):
         raise ValueError('Assignments belong to a different tracking run.')
@@ -114,11 +114,16 @@ def validate_assignments(document, analysis_path, fps, frame_count):
             raise ValueError('Track IDs and frame ranges must be integers.')
         if not 0 <= start < end <= frame_count:
             raise ValueError('Invalid assignment frame range.')
-        team, jersey = item['team'], item['jersey']
-        if not isinstance(team, str) or not team.strip() or len(team) > 60:
-            raise ValueError('Team label must contain 1–60 characters.')
-        if not isinstance(jersey, str) or not jersey.isascii() or not jersey.isdigit() or len(jersey) > 3:
-            raise ValueError('Jersey number must contain 1–3 digits.')
+        if document['schema'] == 'named-player-assignments-v1':
+            name = item.get('name')
+            if not isinstance(name, str) or not name.strip() or len(name) > 60:
+                raise ValueError('Player name must contain 1–60 characters.')
+        else:
+            team, jersey = item['team'], item['jersey']
+            if not isinstance(team, str) or not team.strip() or len(team) > 60:
+                raise ValueError('Team label must contain 1–60 characters.')
+            if not isinstance(jersey, str) or not jersey.isascii() or not jersey.isdigit() or len(jersey) > 3:
+                raise ValueError('Jersey number must contain 1–3 digits.')
         grouped.setdefault(track_id, []).append(item)
     for items in grouped.values():
         items.sort(key=lambda item: item['start_frame'])
@@ -131,6 +136,8 @@ def identity_label(detection, frame_index, assignments):
     track_id = detection['tracker_id']
     for assignment in assignments.get(track_id, []):
         if assignment['start_frame'] <= frame_index < assignment['end_frame']:
+            if 'name' in assignment:
+                return f"{assignment['name']} (ID {track_id})"
             return f"{assignment['team']} #{assignment['jersey']} (ID {track_id})"
     return f'ID {track_id}'
 

@@ -102,6 +102,89 @@ do not reuse them after rerunning tracking. Older videos without a tracking-data
 export require another tracking pass. Review pages embed player crops and work
 offline; keep them local when the footage is private.
 
+### Button review, named identities and learned ranking
+
+The named-player workflow keeps an offline workspace of sample crops and
+decisions. It never automatically confirms a player. Start from an HTML review
+page produced by `review_tracking.py build` or `track-players.sh`:
+
+```bash
+.venv/bin/python examples/soccer/player_review.py prepare \
+  --review /path/to/match.review.html \
+  --workspace examples/soccer/output/player-review --blue-only
+.venv/bin/python examples/soccer/player_review.py build \
+  --workspace examples/soccer/output/player-review --player Alex \
+  --output examples/soccer/output/player-review/batch-1.html
+```
+
+`--blue-only` is an optional blue-shirt pixel filter; omit it for other uniforms.
+This filter can miss small or obscured blue shirts. A track ID is not a jersey
+number and can switch identities. Check the video before assigning a whole
+track; named button decisions cover the track's full observed frame range.
+
+Open the batch page in a browser and use **Yes**, **Not the player**, **Skip** and
+**Undo**. Download `player-decisions.json` to save a durable copy. A batch can load
+its downloaded file to resume. When supported inside Codex, completing a batch
+attempts direct chat submission; decisions are not saved to disk until chat
+confirms. Ordinary browsers use the download/copy fallback. Merge a download:
+
+```bash
+.venv/bin/python examples/soccer/player_review.py apply \
+  --workspace examples/soccer/output/player-review --player Alex \
+  --decisions /path/to/player-decisions.json
+```
+
+Merges are idempotent, validate the entire batch before writing, and bind decisions
+to the tracking-data hash and player. A manual decision overrides an automatic
+exclusion. Skipped tracks stay unresolved and are omitted from subsequent batches;
+remove their entries from `skipped_matches` in `named-assignments.json` to revisit
+them. Automatic exclusions live separately in `automatic_exclusions`; remove an
+entry to undo it. The named file can be passed directly to
+`review_tracking.py render --assignments ...` to draw player names.
+
+Once you have at least five positive and five negative examples spread across
+five 30-second windows, train an appearance ranking:
+
+```bash
+.venv/bin/python examples/soccer/learn_player_filter.py \
+  --workspace examples/soccer/output/player-review --player Alex
+.venv/bin/python examples/soccer/player_review.py build \
+  --workspace examples/soccer/output/player-review --player Alex \
+  --ranking examples/soccer/output/player-review/learned-filter-report.json \
+  --output examples/soccer/output/player-review/batch-2.html
+```
+
+The model uses coarse clothing, head-region colour and texture features; these
+are appearance cues, not face recognition or demographic inference. It combines
+sample views per track and holds nearby tracks together during validation. The
+report includes average precision, top-40 precision, and the number of held-out
+confirmed tracks below a proposed exclusion threshold. Those numbers describe
+the labelled sample, not guaranteed performance on unreviewed footage. Candidate
+updates are compared against the previous training set on identical grouped folds;
+updates are accepted only when both ranking metrics do not decrease. Otherwise
+the previous training set is retained while all manual decisions remain saved.
+Appearance exclusions are only proposals in this report; they are not applied by
+the ranking command. More varied views and lighting are preferable to aggressive
+thresholds when the report shows uncertainty.
+
+An optional temporal check can propose tracks that appear far from an already
+confirmed player at the same time:
+
+```bash
+.venv/bin/python examples/soccer/temporal_player_filter.py \
+  --workspace examples/soccer/output/player-review --player Alex \
+  --analysis /path/to/match.tracks.jsonl
+```
+
+Inspect `temporal-filter-report.json`. Add `--apply` to save reversible exclusions
+only when there are no conflicts with confirmed tracks. The rule requires at least
+five shared frames, separation exceeding two player heights in every shared
+frame, no near matches, and shared evidence covering at least 60% of observations.
+It respects confirmed frame ranges and avoids treating nearby duplicate detections
+as different people. Camera cuts and identity switches can still invalidate its
+assumptions. Keep crops, workspaces, decisions and reports local; the repository's
+`examples/soccer/output/` directory is ignored by Git.
+
 ### Uniform references and stable role labels
 
 `UNIFORM_CLASSIFICATION` uses manually selected uniform examples instead of the
