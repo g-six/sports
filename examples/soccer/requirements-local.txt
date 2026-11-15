@@ -1,0 +1,11 @@
+# Compatible versions for this demo's Supervision and Transformers APIs.
+-r requirements.txt
+supervision==0.23.0
+ultralytics==8.3.40
+torch==2.5.1
+torchvision==0.20.1
+transformers==4.46.3
+numpy==1.26.4
+opencv-python==4.10.0.84
+umap-learn==0.5.7
+scikit-learn==1.5.2

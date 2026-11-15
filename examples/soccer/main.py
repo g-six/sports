@@ -1,6 +1,10 @@
 import argparse
+import json
+from contextlib import nullcontext
+from copy import deepcopy
 from enum import Enum
-from typing import Iterator, List
+from itertools import islice
+from typing import Iterator, List, Optional
 
 import os
 import cv2
@@ -13,6 +17,9 @@ from sports.annotators.soccer import draw_pitch, draw_points_on_pitch
 from sports.common.ball import BallTracker, BallAnnotator
 from sports.common.team import TeamClassifier
 from sports.common.view import ViewTransformer
+from sports.common.uniform import UniformClassifier
+from sports.common.detection import detect_people, normalize_person_detections
+from sports.common.motion import CameraMotionEstimator, transform_boxes
 from sports.configs.soccer import SoccerPitchConfiguration
 
 PARENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -79,6 +86,7 @@ class Mode(Enum):
     BALL_DETECTION = 'BALL_DETECTION'
     PLAYER_TRACKING = 'PLAYER_TRACKING'
     TEAM_CLASSIFICATION = 'TEAM_CLASSIFICATION'
+    UNIFORM_CLASSIFICATION = 'UNIFORM_CLASSIFICATION'
     RADAR = 'RADAR'
 
 
@@ -181,7 +189,10 @@ def run_pitch_detection(source_video_path: str, device: str) -> Iterator[np.ndar
         yield annotated_frame
 
 
-def run_player_detection(source_video_path: str, device: str) -> Iterator[np.ndarray]:
+def run_player_detection(
+    source_video_path: str, device: str, tiled_detection: bool = False,
+    person_model: Optional[str] = None,
+) -> Iterator[np.ndarray]:
     """
     Run player detection on a video and yield annotated frames.
 
@@ -192,11 +203,18 @@ def run_player_detection(source_video_path: str, device: str) -> Iterator[np.nda
     Yields:
         Iterator[np.ndarray]: Iterator over annotated frames.
     """
-    player_detection_model = YOLO(PLAYER_DETECTION_MODEL_PATH).to(device=device)
+    player_detection_model = YOLO(person_model or PLAYER_DETECTION_MODEL_PATH).to(device=device)
+    person_id = get_person_class_id(player_detection_model) if person_model else None
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
-    for frame in frame_generator:
-        result = player_detection_model(frame, imgsz=1280, verbose=False)[0]
+
+    def infer(image):
+        kwargs = {'classes': [person_id]} if person_model else {}
+        result = player_detection_model(image, imgsz=1280, verbose=False, **kwargs)[0]
         detections = sv.Detections.from_ultralytics(result)
+        return normalize_person_detections(detections, person_id) if person_model else detections
+
+    for frame in frame_generator:
+        detections = detect_people(frame, infer, tiled=True) if tiled_detection else infer(frame)
 
         annotated_frame = frame.copy()
         annotated_frame = BOX_ANNOTATOR.annotate(annotated_frame, detections)
@@ -238,7 +256,10 @@ def run_ball_detection(source_video_path: str, device: str) -> Iterator[np.ndarr
         yield annotated_frame
 
 
-def run_player_tracking(source_video_path: str, device: str) -> Iterator[np.ndarray]:
+def run_player_tracking(
+    source_video_path: str, device: str, analysis_path: Optional[str] = None,
+    source_time_offset: float = 0,
+) -> Iterator[np.ndarray]:
     """
     Run player tracking on a video and yield annotated frames with tracked players.
 
@@ -251,19 +272,39 @@ def run_player_tracking(source_video_path: str, device: str) -> Iterator[np.ndar
     """
     player_detection_model = YOLO(PLAYER_DETECTION_MODEL_PATH).to(device=device)
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
-    tracker = sv.ByteTrack(minimum_consecutive_frames=3)
-    for frame in frame_generator:
-        result = player_detection_model(frame, imgsz=1280, verbose=False)[0]
-        detections = sv.Detections.from_ultralytics(result)
-        detections = tracker.update_with_detections(detections)
+    video_info = sv.VideoInfo.from_video_path(source_video_path)
+    tracker = sv.ByteTrack(frame_rate=video_info.fps, minimum_consecutive_frames=3)
+    output = open(analysis_path, 'x') if analysis_path else nullcontext(None)
+    with output as analysis:
+        for frame_index, frame in enumerate(frame_generator):
+            result = player_detection_model(frame, imgsz=1280, verbose=False)[0]
+            detections = sv.Detections.from_ultralytics(result)
+            detections = tracker.update_with_detections(detections)
+            track_ids = detections.tracker_id if detections.tracker_id is not None else []
+            if analysis is not None:
+                record = {
+                    'schema': 'player-tracking-v1',
+                    'frame_index': frame_index,
+                    'timestamp': frame_index / video_info.fps,
+                    'source_timestamp': source_time_offset + frame_index / video_info.fps,
+                    'fps': video_info.fps,
+                    'width': video_info.width, 'height': video_info.height,
+                    'detections': [
+                        {'tracker_id': int(track_id), 'bbox': box.tolist(),
+                         'class_id': int(class_id), 'confidence': float(confidence)}
+                        for box, track_id, class_id, confidence in zip(
+                            detections.xyxy, track_ids,
+                            detections.class_id, detections.confidence)
+                    ],
+                }
+                analysis.write(json.dumps(record) + '\n')
 
-        labels = [str(tracker_id) for tracker_id in detections.tracker_id]
-
-        annotated_frame = frame.copy()
-        annotated_frame = ELLIPSE_ANNOTATOR.annotate(annotated_frame, detections)
-        annotated_frame = ELLIPSE_LABEL_ANNOTATOR.annotate(
-            annotated_frame, detections, labels=labels)
-        yield annotated_frame
+            labels = [str(tracker_id) for tracker_id in track_ids]
+            annotated_frame = frame.copy()
+            annotated_frame = ELLIPSE_ANNOTATOR.annotate(annotated_frame, detections)
+            annotated_frame = ELLIPSE_LABEL_ANNOTATOR.annotate(
+                annotated_frame, detections, labels=labels)
+            yield annotated_frame
 
 
 def run_team_classification(source_video_path: str, device: str) -> Iterator[np.ndarray]:
@@ -321,6 +362,117 @@ def run_team_classification(source_video_path: str, device: str) -> Iterator[np.
         annotated_frame = ELLIPSE_LABEL_ANNOTATOR.annotate(
             annotated_frame, detections, labels, custom_color_lookup=color_lookup)
         yield annotated_frame
+
+
+def get_person_class_id(model) -> int:
+    """Find the person class by name instead of assuming an arbitrary model index."""
+    person_id = next((key for key, name in model.names.items() if name == 'person'), None)
+    if person_id is None:
+        raise ValueError("The general model must have a class named 'person'.")
+    return person_id
+
+
+def run_uniform_classification(
+    source_video_path: str, device: str, uniform_config: str,
+    analysis_path: Optional[str] = None, tiled_detection: bool = False,
+    person_model: Optional[str] = None,
+    compensate_camera_motion: bool = False,
+    raw_frames: Optional[Iterator[sv.Detections]] = None,
+) -> Iterator[np.ndarray]:
+    """Track people and classify uniforms using supplied full-person references."""
+    classifier = UniformClassifier.from_config(uniform_config)
+    model = None if raw_frames is not None else YOLO(
+        person_model or PLAYER_DETECTION_MODEL_PATH).to(device=device)
+    person_id = get_person_class_id(model) if person_model and model is not None else None
+    video_info = sv.VideoInfo.from_video_path(source_video_path)
+    tracker = sv.ByteTrack(frame_rate=video_info.fps, minimum_consecutive_frames=1)
+    motion_estimator = CameraMotionEstimator() if compensate_camera_motion else None
+    track_offset, maximum_track_id = 0, 0
+    palette = sv.ColorPalette.from_hex(
+        [reference.color or COLORS[i % len(COLORS)]
+         for i, reference in enumerate(classifier.references)] + ['#999999'])
+    boxes = sv.BoxAnnotator(color=palette, thickness=2)
+    labels_annotator = sv.LabelAnnotator(
+        color=palette, text_scale=.4, text_color=sv.Color.BLACK)
+    report = open(analysis_path, 'w') if analysis_path else None
+
+    def infer(image):
+        kwargs = {'classes': [person_id]} if person_model else {}
+        result = model(image, imgsz=1280, verbose=False, **kwargs)[0]
+        detections = sv.Detections.from_ultralytics(result)
+        return normalize_person_detections(detections, person_id) if person_model else detections
+
+    try:
+        frames = sv.get_video_frames_generator(source_path=source_video_path)
+        for frame_index, frame in enumerate(frames):
+            if raw_frames is None:
+                raw = detect_people(frame, infer, tiled=tiled_detection)
+            else:
+                try:
+                    raw = next(raw_frames)
+                except StopIteration as error:
+                    raise ValueError('Saved detections ended before the source video.') from error
+            people = raw[np.isin(raw.class_id, [PLAYER_CLASS_ID, GOALKEEPER_CLASS_ID, REFEREE_CLASS_ID])]
+            motion = motion_estimator.update(frame, people.xyxy) if motion_estimator else None
+            if motion is not None and motion.reset:
+                tracker.reset()
+                classifier.tracks.clear()
+                track_offset = maximum_track_id
+            # Track in stabilized coordinates, but classify and draw the original
+            # image crops. Keep unconfirmed detections visible as uncertain.
+            tracking_people = deepcopy(people)
+            if motion is not None:
+                tracking_people.xyxy = transform_boxes(people.xyxy, motion.current_to_reference)
+            tracking_people.tracker_id = np.full(len(people), -1, dtype=int)
+            tracker.update_with_detections(tracking_people)
+            people.tracker_id = tracking_people.tracker_id.copy()
+            people.tracker_id[people.tracker_id >= 0] += track_offset
+            if len(people):
+                maximum_track_id = max(maximum_track_id, int(people.tracker_id.max()))
+            detections = people
+            classifier.begin_frame()
+            predictions = []
+            labels = []
+            colors = []
+            for detection_index, (track_id, crop) in enumerate(zip(
+                    detections.tracker_id, get_crops(frame, detections))):
+                prediction = classifier.update(int(track_id), crop)
+                track_label = f"#{track_id}" if track_id >= 0 else "untracked"
+                labels.append(f"{track_label} {prediction.name}")
+                colors.append(
+                    prediction.reference_index if prediction.role is not None
+                    else len(classifier.references))
+                predictions.append({
+                    'tracker_id': int(track_id),
+                    'xyxy': detections.xyxy[detection_index].tolist(),
+                    'detector_role': 'person' if person_model else {
+                        1: 'goalkeeper', 2: 'player', 3: 'referee'}[
+                            int(detections.class_id[detection_index])],
+                    'uniform': prediction.name,
+                    'role': prediction.role,
+                })
+            if report:
+                report.write(json.dumps({
+                    'frame': frame_index,
+                    'camera_motion': None if motion is None else {
+                        'valid': motion.valid, 'reset': motion.reset,
+                        'inlier_ratio': motion.inlier_ratio,
+                        'feature_count': motion.feature_count,
+                        'current_to_reference': motion.current_to_reference.tolist(),
+                    },
+                    'raw_detections': [
+                        {'xyxy': box.tolist(), 'class_id': int(class_id), 'confidence': float(conf)}
+                        for box, class_id, conf in zip(raw.xyxy, raw.class_id, raw.confidence)
+                    ],
+                    'predictions': predictions,
+                }) + '\n')
+            color_lookup = np.asarray(colors, dtype=int)
+            annotated = boxes.annotate(frame.copy(), detections, custom_color_lookup=color_lookup)
+            yield labels_annotator.annotate(
+                annotated, detections, labels=labels, custom_color_lookup=color_lookup)
+    finally:
+        if report:
+            report.close()
 
 
 def run_radar(source_video_path: str, device: str) -> Iterator[np.ndarray]:
@@ -386,19 +538,56 @@ def run_radar(source_video_path: str, device: str) -> Iterator[np.ndarray]:
         yield annotated_frame
 
 
-def main(source_video_path: str, target_video_path: str, device: str, mode: Mode) -> None:
-    if mode == Mode.PITCH_DETECTION:
+def main(
+    source_video_path: str,
+    target_video_path: str,
+    device: str,
+    mode: Mode,
+    no_display: bool = False,
+    max_frames: Optional[int] = None,
+    uniform_config: Optional[str] = None,
+    analysis_path: Optional[str] = None,
+    tiled_detection: bool = False,
+    person_model: Optional[str] = None,
+    compensate_camera_motion: bool = False,
+    source_time_offset: float = 0,
+) -> None:
+    if not np.isfinite(source_time_offset) or source_time_offset < 0:
+        raise ValueError('source_time_offset must be finite and nonnegative.')
+    if mode == Mode.PLAYER_TRACKING and analysis_path:
+        if os.path.exists(analysis_path):
+            raise ValueError('Tracking analysis output already exists; choose a new path.')
+        if os.path.abspath(analysis_path) in (
+                os.path.abspath(source_video_path), os.path.abspath(target_video_path)):
+            raise ValueError('Tracking analysis must use a separate path from the video files.')
+    if max_frames is not None and max_frames <= 0:
+        raise ValueError("max_frames must be greater than zero.")
+    if tiled_detection and mode not in (Mode.PLAYER_DETECTION, Mode.UNIFORM_CLASSIFICATION):
+        raise ValueError("--tiled_detection supports PLAYER_DETECTION and UNIFORM_CLASSIFICATION.")
+    if person_model and mode not in (Mode.PLAYER_DETECTION, Mode.UNIFORM_CLASSIFICATION):
+        raise ValueError("--person_model supports PLAYER_DETECTION and UNIFORM_CLASSIFICATION.")
+    if compensate_camera_motion and mode != Mode.UNIFORM_CLASSIFICATION:
+        raise ValueError('--compensate_camera_motion requires UNIFORM_CLASSIFICATION.')
+    if mode == Mode.UNIFORM_CLASSIFICATION:
+        if uniform_config is None:
+            raise ValueError("UNIFORM_CLASSIFICATION requires --uniform_config.")
+        frame_generator = run_uniform_classification(
+            source_video_path, device, uniform_config, analysis_path, tiled_detection,
+            person_model, compensate_camera_motion)
+    elif mode == Mode.PITCH_DETECTION:
         frame_generator = run_pitch_detection(
             source_video_path=source_video_path, device=device)
     elif mode == Mode.PLAYER_DETECTION:
         frame_generator = run_player_detection(
-            source_video_path=source_video_path, device=device)
+            source_video_path=source_video_path, device=device,
+            tiled_detection=tiled_detection, person_model=person_model)
     elif mode == Mode.BALL_DETECTION:
         frame_generator = run_ball_detection(
             source_video_path=source_video_path, device=device)
     elif mode == Mode.PLAYER_TRACKING:
         frame_generator = run_player_tracking(
-            source_video_path=source_video_path, device=device)
+            source_video_path=source_video_path, device=device,
+            analysis_path=analysis_path, source_time_offset=source_time_offset)
     elif mode == Mode.TEAM_CLASSIFICATION:
         frame_generator = run_team_classification(
             source_video_path=source_video_path, device=device)
@@ -409,14 +598,22 @@ def main(source_video_path: str, target_video_path: str, device: str, mode: Mode
         raise NotImplementedError(f"Mode {mode} is not implemented.")
 
     video_info = sv.VideoInfo.from_video_path(source_video_path)
+    if max_frames is not None:
+        frame_generator = islice(frame_generator, max_frames)
+    total = (
+        min(video_info.total_frames, max_frames)
+        if max_frames is not None else video_info.total_frames
+    )
     with sv.VideoSink(target_video_path, video_info) as sink:
-        for frame in frame_generator:
+        for frame in tqdm(frame_generator, total=total, desc="Processing video"):
             sink.write_frame(frame)
 
-            cv2.imshow("frame", frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-        cv2.destroyAllWindows()
+            if not no_display:
+                cv2.imshow("frame", frame)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+        if not no_display:
+            cv2.destroyAllWindows()
 
 
 if __name__ == '__main__':
@@ -425,10 +622,35 @@ if __name__ == '__main__':
     parser.add_argument('--target_video_path', type=str, required=True)
     parser.add_argument('--device', type=str, default='cpu')
     parser.add_argument('--mode', type=Mode, default=Mode.PLAYER_DETECTION)
+    parser.add_argument('--uniform_config', help='JSON file containing named uniform reference images.')
+    parser.add_argument('--analysis_path', help='Per-frame JSONL output for uniform classification or player tracking.')
+    parser.add_argument('--source_time_offset', type=float, default=0,
+                        help='Original video start time in seconds for tracking export timestamps.')
+    parser.add_argument('--person_model', help='General person model weights; uniform mode determines roles separately.')
+    parser.add_argument(
+        '--compensate_camera_motion', action='store_true',
+        help='Stabilize tracking with background pan/zoom estimates (experimental).')
+    parser.add_argument(
+        '--tiled_detection', action='store_true',
+        help='Add overlapping person detection tiles (player detection or uniform mode).')
+    parser.add_argument(
+        '--no_display', action='store_true',
+        help='Save video without opening a preview window.')
+    parser.add_argument(
+        '--max_frames', type=int, default=None,
+        help='Limit output frames for a short smoke test.')
     args = parser.parse_args()
     main(
         source_video_path=args.source_video_path,
         target_video_path=args.target_video_path,
         device=args.device,
-        mode=args.mode
+        mode=args.mode,
+        no_display=args.no_display,
+        max_frames=args.max_frames,
+        uniform_config=args.uniform_config,
+        analysis_path=args.analysis_path,
+        tiled_detection=args.tiled_detection,
+        person_model=args.person_model,
+        compensate_camera_motion=args.compensate_camera_motion,
+        source_time_offset=args.source_time_offset,
     )

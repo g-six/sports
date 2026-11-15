@@ -48,6 +48,8 @@ htmlcov/
 .coverage
 .coverage.*
 .cache
+examples/soccer/data/
+examples/soccer/output/
 nosetests.xml
 coverage.xml
 *.cover
